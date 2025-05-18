@@ -1,0 +1,638 @@
+import UIKit
+import AVFoundation
+import CoreBluetooth
+
+@main
+class AppDelegate: UIResponder, UIApplicationDelegate {
+    var window: UIWindow?
+   
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        window = UIWindow(frame: UIScreen.main.bounds)
+        window?.rootViewController = DecibelMeterViewController()
+        window?.backgroundColor = .systemBackground
+        window?.makeKeyAndVisible()
+       
+        return true
+    }
+}
+
+class DecibelMeterViewController: UIViewController, CBCentralManagerDelegate, CBPeripheralDelegate {
+   
+    private let decibelLabel = UILabel()
+    private let maxDecibelLabel = UILabel()
+    private let statusLabel = UILabel()
+    private let startStopButton = UIButton()
+    private let connectionButton = UIButton()
+    private let decibelMeter = UIProgressView()
+    private let resetButton = UIButton()
+    private let calibrateButton = UIButton()
+   
+    private var audioRecorder: AVAudioRecorder?
+    private var audioRecorderTimer: Timer?
+    private let updateInterval: TimeInterval = 0.1
+    private var referenceLevel: Float = -20.0
+    private var decibelReadings: [Float] = []
+    private let readingsToKeep = 5
+   
+    private var centralManager: CBCentralManager!
+    private var peripheral: CBPeripheral?
+    private var txCharacteristic: CBCharacteristic?
+    private var rxCharacteristic: CBCharacteristic?
+    private var discoveredPeripherals: [CBPeripheral] = []
+   
+    private let serviceUUID = CBUUID(string: "00001101-0000-1000-8000-00805F9B34FB")
+    private let rxUUID = CBUUID(string: "00001101-0000-1000-8000-00805F9B34FB")
+   
+    private var isRecording = false
+    private var maxDecibel: Float = 0.0
+    private var isBluetoothConnected = false
+   
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        print("View Did Load")
+        view.backgroundColor = .systemBackground
+        setupUI()
+        setupBluetoothManager()
+        requestAudioPermission()
+    }
+   
+    private func setupUI() {
+        let debugLabel = UILabel()
+        debugLabel.text = "DECIBEL METER APP"
+        debugLabel.font = UIFont.systemFont(ofSize: 24, weight: .bold)
+        debugLabel.textAlignment = .center
+        debugLabel.textColor = .systemRed
+        debugLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(debugLabel)
+       
+        decibelLabel.text = "0 dB"
+        decibelLabel.font = UIFont.systemFont(ofSize: 48, weight: .bold)
+        decibelLabel.textAlignment = .center
+        decibelLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(decibelLabel)
+       
+        maxDecibelLabel.text = "Max: 0 dB"
+        maxDecibelLabel.font = UIFont.systemFont(ofSize: 18, weight: .medium)
+        maxDecibelLabel.textAlignment = .center
+        maxDecibelLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(maxDecibelLabel)
+       
+        decibelMeter.progressTintColor = .systemGreen
+        decibelMeter.trackTintColor = .systemGray5
+        decibelMeter.translatesAutoresizingMaskIntoConstraints = false
+        decibelMeter.progress = 0.0
+        view.addSubview(decibelMeter)
+       
+        statusLabel.text = "Bluetooth: Disconnected"
+        statusLabel.font = UIFont.systemFont(ofSize: 16)
+        statusLabel.textAlignment = .center
+        statusLabel.textColor = .systemGray
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(statusLabel)
+       
+        var buttonConfig = UIButton.Configuration.filled()
+        buttonConfig.title = "Start Measuring"
+        buttonConfig.baseBackgroundColor = .systemBlue
+        buttonConfig.cornerStyle = .medium
+        startStopButton.configuration = buttonConfig
+        startStopButton.addTarget(self, action: #selector(startStopButtonTapped), for: .touchUpInside)
+        startStopButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(startStopButton)
+       
+        var connConfig = UIButton.Configuration.filled()
+        connConfig.title = "Connect Bluetooth"
+        connConfig.baseBackgroundColor = .systemGreen
+        connConfig.cornerStyle = .medium
+        connectionButton.configuration = connConfig
+        connectionButton.addTarget(self, action: #selector(connectionButtonTapped), for: .touchUpInside)
+        connectionButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(connectionButton)
+       
+        var resetConfig = UIButton.Configuration.filled()
+        resetConfig.title = "Reset Max"
+        resetConfig.baseBackgroundColor = .systemGray
+        resetConfig.cornerStyle = .medium
+        resetButton.configuration = resetConfig
+        resetButton.addTarget(self, action: #selector(resetButtonTapped), for: .touchUpInside)
+        resetButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(resetButton)
+       
+        NSLayoutConstraint.activate([
+            debugLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            debugLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 20),
+           
+            decibelLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            decibelLabel.topAnchor.constraint(equalTo: debugLabel.bottomAnchor, constant: 30),
+           
+            maxDecibelLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            maxDecibelLabel.topAnchor.constraint(equalTo: decibelLabel.bottomAnchor, constant: 8),
+           
+            decibelMeter.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            decibelMeter.topAnchor.constraint(equalTo: maxDecibelLabel.bottomAnchor, constant: 40),
+            decibelMeter.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
+            decibelMeter.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
+            decibelMeter.heightAnchor.constraint(equalToConstant: 10),
+           
+            statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            statusLabel.topAnchor.constraint(equalTo: decibelMeter.bottomAnchor, constant: 40),
+           
+            startStopButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            startStopButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 40),
+            startStopButton.widthAnchor.constraint(equalToConstant: 200),
+            startStopButton.heightAnchor.constraint(equalToConstant: 50),
+           
+            connectionButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            connectionButton.topAnchor.constraint(equalTo: startStopButton.bottomAnchor, constant: 20),
+            connectionButton.widthAnchor.constraint(equalToConstant: 200),
+            connectionButton.heightAnchor.constraint(equalToConstant: 50),
+           
+            resetButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            resetButton.topAnchor.constraint(equalTo: connectionButton.bottomAnchor, constant: 20),
+            resetButton.widthAnchor.constraint(equalToConstant: 200),
+            resetButton.heightAnchor.constraint(equalToConstant: 50)
+        ])
+       
+        setupCalibrateButton()
+       
+        updateUI()
+    }
+   
+    private func setupCalibrateButton() {
+        var calibrateConfig = UIButton.Configuration.filled()
+        calibrateConfig.title = "Calibrate"
+        calibrateConfig.baseBackgroundColor = .systemPurple
+        calibrateConfig.cornerStyle = .medium
+        calibrateButton.configuration = calibrateConfig
+        calibrateButton.addTarget(self, action: #selector(calibrateButtonTapped), for: .touchUpInside)
+        calibrateButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(calibrateButton)
+       
+        NSLayoutConstraint.activate([
+            calibrateButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            calibrateButton.topAnchor.constraint(equalTo: resetButton.bottomAnchor, constant: 20),
+            calibrateButton.widthAnchor.constraint(equalToConstant: 200),
+            calibrateButton.heightAnchor.constraint(equalToConstant: 50)
+        ])
+    }
+   
+    private func updateUI() {
+        let startStopTitle = isRecording ? "Stop Measuring" : "Start Measuring"
+        var startStopConfig = startStopButton.configuration
+        startStopConfig?.title = startStopTitle
+        startStopConfig?.baseBackgroundColor = isRecording ? .systemRed : .systemBlue
+        startStopButton.configuration = startStopConfig
+       
+        let connectTitle = isBluetoothConnected ? "Disconnect" : "Connect Bluetooth"
+        var connectConfig = connectionButton.configuration
+        connectConfig?.title = connectTitle
+        connectConfig?.baseBackgroundColor = isBluetoothConnected ? .systemOrange : .systemGreen
+        connectionButton.configuration = connectConfig
+       
+        statusLabel.text = "Bluetooth: \(isBluetoothConnected ? "Connected" : "Disconnected")"
+        statusLabel.textColor = isBluetoothConnected ? .systemGreen : .systemGray
+    }
+   
+    private func setupBluetoothManager() {
+        centralManager = CBCentralManager(delegate: self, queue: nil)
+    }
+   
+    private func requestAudioPermission() {
+        let audioSession = AVAudioSession.sharedInstance()
+
+        do {
+            try audioSession.setCategory(.playAndRecord, mode: .default)
+            try audioSession.setActive(true)
+
+            audioSession.requestRecordPermission { [weak self] granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        self?.setupAudioRecorder()
+                    } else {
+                        self?.showPermissionAlert()
+                    }
+                }
+            }
+        } catch {
+            print("AudioSession setup error: \(error)")
+            showErrorAlert(message: "Failed to setup audio recording.")
+        }
+    }
+   
+    private func showPermissionAlert() {
+        let alert = UIAlertController(
+            title: "Microphone Access Required",
+            message: "This app needs access to your microphone to measure decibel levels. Please enable it in Settings.",
+            preferredStyle: .alert
+        )
+       
+        alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
+            if let url = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(url)
+            }
+        })
+       
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+       
+        present(alert, animated: true)
+    }
+   
+    private func showErrorAlert(message: String) {
+        let alert = UIAlertController(
+            title: "Error",
+            message: message,
+            preferredStyle: .alert
+        )
+       
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+       
+        present(alert, animated: true)
+    }
+   
+    private func setupAudioRecorder() {
+        let audioSettings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatAppleLossless),
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
+       
+        let audioFilename = FileManager.default.temporaryDirectory.appendingPathComponent("audio_measurement.caf")
+       
+        do {
+            audioRecorder = try AVAudioRecorder(url: audioFilename, settings: audioSettings)
+            audioRecorder?.isMeteringEnabled = true
+            audioRecorder?.prepareToRecord()
+        } catch {
+            print("AudioRecorder setup error: \(error)")
+            showErrorAlert(message: "Failed to initialize audio recording.")
+        }
+    }
+   
+    private func startMeasuring() {
+        guard !isRecording else { return }
+       
+        audioRecorder?.record()
+       
+        audioRecorderTimer = Timer.scheduledTimer(withTimeInterval: updateInterval, repeats: true) { [weak self] _ in
+            self?.updateDecibelLevel()
+        }
+       
+        isRecording = true
+        updateUI()
+    }
+   
+    private func stopMeasuring() {
+        guard isRecording else { return }
+       
+        audioRecorder?.stop()
+        audioRecorderTimer?.invalidate()
+        audioRecorderTimer = nil
+       
+        isRecording = false
+        updateUI()
+    }
+   
+    private func calibrateReferenceLevel() {
+        let wasRecording = isRecording
+        if !wasRecording {
+            audioRecorder?.record()
+        }
+       
+        audioRecorder?.updateMeters()
+       
+        if let powerLevel = audioRecorder?.averagePower(forChannel: 0) {
+            referenceLevel = powerLevel - 60.0
+            print("Calibrated reference level to: \(referenceLevel)")
+        }
+       
+        if !wasRecording {
+            audioRecorder?.stop()
+        }
+    }
+   
+    private func updateDecibelLevel() {
+        audioRecorder?.updateMeters()
+       
+        if let powerLevel = audioRecorder?.averagePower(forChannel: 0) {
+            let decibelValue = powerLevel - referenceLevel
+           
+            decibelReadings.append(decibelValue)
+            if decibelReadings.count > readingsToKeep {
+                decibelReadings.removeFirst()
+            }
+           
+            let averageDecibel = decibelReadings.reduce(0, +) / Float(decibelReadings.count)
+           
+            let roundedDecibel = round(averageDecibel * 10) / 10
+            decibelLabel.text = "\(roundedDecibel) dB"
+           
+            let normalizedValue = (averageDecibel - 30) / 80
+            decibelMeter.progress = min(max(normalizedValue, 0), 1)
+           
+            if roundedDecibel > maxDecibel {
+                maxDecibel = roundedDecibel
+                maxDecibelLabel.text = "Max: \(maxDecibel) dB"
+            }
+           
+            if isBluetoothConnected, let txCharacteristic = txCharacteristic, let peripheral = peripheral {
+                let startMarker: [UInt8] = [0xAA]
+                let intValue = min(max(Int(roundedDecibel), 0), 255)
+                let byteValue: [UInt8] = [UInt8(intValue)]
+                let endMarker: [UInt8] = [0x55]
+    
+                let messageData = Data(startMarker + byteValue + endMarker)
+                peripheral.writeValue(messageData, for: txCharacteristic, type: .withResponse)
+            }
+        }
+    }
+   
+    @objc private func startStopButtonTapped() {
+        if isRecording {
+            stopMeasuring()
+        } else {
+            startMeasuring()
+        }
+    }
+   
+    @objc private func connectionButtonTapped() {
+        if isBluetoothConnected {
+            disconnectBluetooth()
+        } else {
+            let alert = UIAlertController(
+                title: "Bluetooth Connection",
+                message: "Choose an option:",
+                preferredStyle: .actionSheet
+            )
+           
+            alert.addAction(UIAlertAction(title: "Scan for All Devices", style: .default) { [weak self] _ in
+                self?.scanForDevices()
+            })
+           
+            alert.addAction(UIAlertAction(title: "Connect to Zybo PMOD", style: .default) { [weak self] _ in
+                self?.scanForZyboPMOD()
+            })
+           
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+           
+            if let popoverController = alert.popoverPresentationController {
+                popoverController.sourceView = self.connectionButton
+                popoverController.sourceRect = self.connectionButton.bounds
+            }
+           
+            present(alert, animated: true)
+        }
+    }
+   
+    private func scanForZyboPMOD() {
+        if centralManager.state == .poweredOn {
+            statusLabel.text = "Scanning for Zybo PMOD..."
+           
+            discoveredPeripherals.removeAll()
+           
+            centralManager.scanForPeripherals(withServices: [serviceUUID], options: nil)
+           
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                self?.centralManager.stopScan()
+               
+                guard let self = self else { return }
+               
+                let zyboPMODs = self.discoveredPeripherals.filter {
+                    guard let name = $0.name else { return false }
+                    return name.contains("Zybo") || name.contains("PMOD") ||
+                           name.contains("RN-42") || name.contains("RN42")
+                }
+               
+                if zyboPMODs.isEmpty {
+                    if self.discoveredPeripherals.isEmpty {
+                        self.statusLabel.text = "No Zybo PMOD found"
+                        self.showNoDevicesFoundAlert()
+                    } else {
+                        self.showDeviceSelectionAlert()
+                    }
+                } else if zyboPMODs.count == 1 {
+                    self.connectToPeripheral(zyboPMODs[0])
+                } else {
+                    self.showDeviceSelectionAlert(devices: zyboPMODs)
+                }
+            }
+        } else {
+            statusLabel.text = "Bluetooth is not available"
+        }
+    }
+   
+    private func showDeviceSelectionAlert(devices: [CBPeripheral]? = nil) {
+        let devicesToShow = devices ?? discoveredPeripherals
+       
+        let alert = UIAlertController(
+            title: "Select Bluetooth Device",
+            message: "Choose your device:",
+            preferredStyle: .actionSheet
+        )
+       
+        for peripheral in devicesToShow {
+            let name = peripheral.name ?? "Unknown Device"
+            alert.addAction(UIAlertAction(title: name, style: .default) { [weak self] _ in
+                self?.connectToPeripheral(peripheral)
+            })
+        }
+       
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+       
+        if let popoverController = alert.popoverPresentationController {
+            popoverController.sourceView = self.connectionButton
+            popoverController.sourceRect = self.connectionButton.bounds
+        }
+       
+        present(alert, animated: true)
+    }
+   
+    private func showNoDevicesFoundAlert() {
+        let alert = UIAlertController(
+            title: "No Devices Found",
+            message: "No Bluetooth devices were found. Make sure your Zybo PMOD is powered on and in range.",
+            preferredStyle: .alert
+        )
+       
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+       
+        present(alert, animated: true)
+    }
+   
+    @objc private func resetButtonTapped() {
+        maxDecibel = 0.0
+        maxDecibelLabel.text = "Max: 0 dB"
+    }
+   
+    @objc private func calibrateButtonTapped() {
+        let alert = UIAlertController(
+            title: "Calibration",
+            message: "This will calibrate the reference level based on your current environment. Ideal to use during normal conversation (approximately 60dB).",
+            preferredStyle: .alert
+        )
+       
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Calibrate", style: .default) { [weak self] _ in
+            self?.calibrateReferenceLevel()
+           
+            let confirmation = UIAlertController(
+                title: "Calibration Complete",
+                message: "The reference level has been calibrated to your current environment.",
+                preferredStyle: .alert
+            )
+            confirmation.addAction(UIAlertAction(title: "OK", style: .default))
+            self?.present(confirmation, animated: true)
+        })
+       
+        present(alert, animated: true)
+    }
+   
+    private func scanForDevices() {
+        if centralManager.state == .poweredOn {
+            statusLabel.text = "Scanning for devices..."
+           
+            discoveredPeripherals.removeAll()
+           
+            centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+           
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.centralManager.stopScan()
+               
+                guard let self = self else { return }
+               
+                if self.discoveredPeripherals.isEmpty {
+                    self.statusLabel.text = "Bluetooth: No devices found"
+                    self.showNoDevicesFoundAlert()
+                } else {
+                    self.showDeviceSelectionAlert()
+                }
+            }
+        } else {
+            statusLabel.text = "Bluetooth is not available"
+        }
+    }
+   
+    private func connectToPeripheral(_ peripheral: CBPeripheral) {
+        self.peripheral = peripheral
+        statusLabel.text = "Connecting to \(peripheral.name ?? "device")..."
+        centralManager.connect(peripheral, options: nil)
+    }
+   
+    private func disconnectBluetooth() {
+        if let peripheral = peripheral {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+    }
+   
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        switch central.state {
+        case .poweredOn:
+            statusLabel.text = "Bluetooth: Ready to connect"
+        case .poweredOff:
+            statusLabel.text = "Bluetooth: Powered Off"
+            isBluetoothConnected = false
+            updateUI()
+        case .resetting:
+            statusLabel.text = "Bluetooth: Resetting"
+        case .unauthorized:
+            statusLabel.text = "Bluetooth: Not Authorized"
+        case .unsupported:
+            statusLabel.text = "Bluetooth: Not Supported"
+        case .unknown:
+            statusLabel.text = "Bluetooth: Unknown State"
+        @unknown default:
+            statusLabel.text = "Bluetooth: Unknown State"
+        }
+    }
+   
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+        if !discoveredPeripherals.contains(where: { $0.identifier == peripheral.identifier }) {
+            if peripheral.name != nil ||
+               (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID])?.contains(serviceUUID) == true {
+                discoveredPeripherals.append(peripheral)
+                print("Discovered: \(peripheral.name ?? "Unnamed device") (\(peripheral.identifier))")
+               
+                statusLabel.text = "Found \(discoveredPeripherals.count) device(s)..."
+            }
+        }
+    }
+   
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        statusLabel.text = "Connected to device"
+        peripheral.delegate = self
+        peripheral.discoverServices([serviceUUID])
+    }
+   
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        statusLabel.text = "Failed to connect"
+        isBluetoothConnected = false
+        updateUI()
+    }
+   
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        statusLabel.text = "Bluetooth: Disconnected"
+        isBluetoothConnected = false
+        updateUI()
+       
+        if error != nil {
+            centralManager.connect(peripheral, options: nil)
+        }
+    }
+   
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard error == nil else {
+            print("Error discovering services: \(error!.localizedDescription)")
+            return
+        }
+       
+        guard let services = peripheral.services else { return }
+       
+        for service in services {
+            peripheral.discoverCharacteristics(nil, for: service)
+        }
+    }
+   
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard error == nil else {
+            print("Error discovering characteristics: \(error!.localizedDescription)")
+            return
+        }
+       
+        guard let characteristics = service.characteristics else { return }
+       
+        for characteristic in characteristics {
+            if characteristic.uuid == rxUUID {
+                rxCharacteristic = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
+           
+            txCharacteristic = characteristic
+        }
+       
+        if txCharacteristic != nil {
+            isBluetoothConnected = true
+            updateUI()
+        }
+    }
+   
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard error == nil else {
+            print("Error receiving data: \(error!.localizedDescription)")
+            return
+        }
+       
+        guard let data = characteristic.value else { return }
+        print("Received data: \(data)")
+    }
+   
+    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let error = error {
+            print("Error writing data: \(error.localizedDescription)")
+        }
+    }
+   
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        stopMeasuring()
+        disconnectBluetooth()
+    }
+}
